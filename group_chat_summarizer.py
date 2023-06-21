@@ -5,6 +5,7 @@ import datetime
 from dateutil.parser import parse
 import argparse
 import json
+import glob
 
 DATE_PATTERN = r'(\[\d{1,2}/\d{1,2}/\d{2,4},\s\d{1,2}:\d{2}:\d{2}\s[AP]M\])'
 SUMMARY_PROMPT = f"""Please summarize the following WhatsApp group chat based on topics that were discussed. For each topic, include its title and summary in bullet points. The bullets should include detailed information. If the topic includes recommendations about specific companies or services, please include them in the summary. Please include links that were shared."""
@@ -233,31 +234,43 @@ def summarize_messages(chunks, model):
     return summary
 
 
-def main(chat_type, chat_export_file, summary_file, start_day_s, end_day_s, is_newsletter, model):
+def main(chat_type, chat_export_directory, summary_file, start_day_s, end_day_s, is_newsletter, model):
     start_day = datetime.datetime.strptime(start_day_s, '%m/%d/%Y').date()
     end_day = datetime.datetime.strptime(end_day_s, '%m/%d/%Y').date()
 
-    if chat_type == 'WhatsApp':
-        content = read_file(chat_export_file)
-        parsed_messages = parse_whatsapp(content)
-        filtered_messages = filter_messages_by_dates(
-            parsed_messages, start_day, end_day)
-        chunks = whatsapp_chunk_text(filtered_messages)
-    elif chat_type == 'Signal':
-        content = read_file(chat_export_file)
-        parsed_messages = parse_signal_chat(content)
-        filtered_messages = filter_messages_by_dates(
-            parsed_messages, start_day, end_day)
-        chunks = signal_chunk_text(filtered_messages)
-    elif chat_type == 'Slack':  # Add support for Slack
-        parsed_messages = parse_slack(chat_export_file)
-        filtered_messages = filter_messages_by_dates(
-            parsed_messages, start_day, end_day)
-        chunks = slack_chunk_text(filtered_messages)
-    else:
-        print('ERROR: Chat type must be either WhatsApp, Signal or Slack')
-        exit(1)
+    all_messages = []  # List to store all messages from all files
 
+    # Collect all .json files in the directory
+    files = glob.glob(f"{chat_export_directory}/*.json")
+
+    for chat_export_file in files:
+        if chat_type == 'WhatsApp':
+            content = read_file(chat_export_file)
+            parsed_messages = parse_whatsapp(content)
+            filtered_messages = filter_messages_by_dates(
+                parsed_messages, start_day, end_day)
+            all_messages.extend(filtered_messages)
+        elif chat_type == 'Signal':
+            content = read_file(chat_export_file)
+            parsed_messages = parse_signal_chat(content)
+            filtered_messages = filter_messages_by_dates(
+                parsed_messages, start_day, end_day)
+            all_messages.extend(filtered_messages)
+        elif chat_type == 'Slack':
+            parsed_messages = parse_slack(chat_export_file)
+            filtered_messages = filter_messages_by_dates(
+                parsed_messages, start_day, end_day)
+            all_messages.extend(filtered_messages)
+        else:
+            print('ERROR: Chat type must be either WhatsApp, Signal or Slack')
+            exit(1)
+
+    # Once all messages have been collected, chunk and summarize them
+    if chat_type in ['WhatsApp', 'Signal']:
+        chunks = whatsapp_chunk_text(all_messages) if chat_type == 'WhatsApp' else signal_chunk_text(all_messages)
+    elif chat_type == 'Slack':
+        chunks = slack_chunk_text(all_messages)
+    
     summary = summarize_messages(chunks, model)
 
     if is_newsletter:
@@ -271,22 +284,24 @@ def main(chat_type, chat_export_file, summary_file, start_day_s, end_day_s, is_n
         f.write(summary)
 
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
-    parser.add_argument("chat_export_file",
-                        help="Input file, export of the chat")
-    parser.add_argument("summary_file", help="Summary output file")
-    parser.add_argument("start_date", help="When to start summarizing from")
-    parser.add_argument("end_date", help="Until when to summarize")
-    # Update to include 'Slack'
-    parser.add_argument("--chat_type", help="WhatsApp, Signal or Slack")
-    parser.add_argument("--model", default="gpt-4", help="OpenAI model to use for summarization")
-
-    parser.add_argument("--newsletter", action=argparse.BooleanOptionalAction,
-                        help="Generate an introduction for a newsletter")
-
-    args = parser.parse_args()
+    parser.add_argument('chat_export_directory', help='The directory containing your exported chat files.')
+    parser.add_argument('summary_file', type=str,
+                        help='The file where the summary should be written')
+    parser.add_argument('start_date', type=str, 
+                        help='The start date for the chat range to summarize (mm/dd/yyyy)')
+    parser.add_argument('end_date', type=str, 
+                        help='The end date for the chat range to summarize (mm/dd/yyyy)')
+    parser.add_argument('--chat_type', type=str, choices=['WhatsApp', 'Signal', 'Slack'], default='WhatsApp',
+                        help='The type of chat export (WhatsApp, Signal, Slack)')
+    parser.add_argument('--model', type=str, default='gpt-3.5-turbo', 
+                        help='The OpenAI model to use for summarization')
+    parser.add_argument('--newsletter', dest='newsletter', action='store_true',
+                        help='If set, will include a generated "newsletter intro" at the beginning of the summary')
+    parser.set_defaults(newsletter=False)
+    args = parser.parse_args()  
 
     # Update to include 'Slack'
     if args.chat_type not in ['WhatsApp', 'Signal', 'Slack']:
@@ -298,7 +313,7 @@ if __name__ == "__main__":
 
     main(
         args.chat_type,
-        args.chat_export_file,
+        args.chat_export_directory,
         args.summary_file,
         args.start_date,
         args.end_date,
